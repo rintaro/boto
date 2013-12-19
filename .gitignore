@@ -12,5 +12,7 @@ MANIFEST
 .coverage
 *flymake.py
 venv
+venv-2.5
+env-2.5
 # for python 3 port
 py3kport/build*

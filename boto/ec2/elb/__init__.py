@@ -36,6 +36,7 @@ import boto
 
 RegionData = {
     'us-east-1': 'elasticloadbalancing.us-east-1.amazonaws.com',
+    'us-gov-west-1': 'elasticloadbalancing.us-gov-west-1.amazonaws.com',
     'us-west-1': 'elasticloadbalancing.us-west-1.amazonaws.com',
     'us-west-2': 'elasticloadbalancing.us-west-2.amazonaws.com',
     'sa-east-1': 'elasticloadbalancing.sa-east-1.amazonaws.com',
@@ -158,7 +159,7 @@ class ELBConnection(AWSQueryConnection):
             [SSLCertificateId]) where LoadBalancerPortNumber and
             InstancePortNumber are integer values between 1 and 65535,
             Protocol is a string containing either 'TCP', 'SSL', HTTP', or
-            'HTTPS'; SSLCertificateID is the ARN of a AWS AIM
+            'HTTPS'; SSLCertificateID is the ARN of a AWS IAM
             certificate, and must be specified when doing HTTPS.
 
         :type subnets: list of strings
@@ -187,13 +188,13 @@ class ELBConnection(AWSQueryConnection):
             (LoadBalancerPortNumber, InstancePortNumber, Protocol, InstanceProtocol,
             SSLCertificateId).
 
-            Where;
-            - LoadBalancerPortNumber and InstancePortNumber are integer
-              values between 1 and 65535.
-            - Protocol and InstanceProtocol is a string containing either 'TCP',
-              'SSL', 'HTTP', or 'HTTPS'
-            - SSLCertificateId is the ARN of an SSL certificate loaded into
-              AWS IAM
+            Where:
+                - LoadBalancerPortNumber and InstancePortNumber are integer
+                  values between 1 and 65535
+                - Protocol and InstanceProtocol is a string containing either 'TCP',
+                  'SSL', 'HTTP', or 'HTTPS'
+                - SSLCertificateId is the ARN of an SSL certificate loaded into
+                  AWS IAM
 
         :rtype: :class:`boto.ec2.elb.loadbalancer.LoadBalancer`
         :return: The newly created
@@ -263,7 +264,7 @@ class ELBConnection(AWSQueryConnection):
             [SSLCertificateId]) where LoadBalancerPortNumber and
             InstancePortNumber are integer values between 1 and 65535,
             Protocol is a string containing either 'TCP', 'SSL', HTTP', or
-            'HTTPS'; SSLCertificateID is the ARN of a AWS AIM
+            'HTTPS'; SSLCertificateID is the ARN of a AWS IAM
             certificate, and must be specified when doing HTTPS.
 
         :type complex_listeners: List of tuples
@@ -271,13 +272,13 @@ class ELBConnection(AWSQueryConnection):
             (LoadBalancerPortNumber, InstancePortNumber, Protocol, InstanceProtocol,
             SSLCertificateId).
 
-            Where;
-            - LoadBalancerPortNumber and InstancePortNumber are integer 
-              values between 1 and 65535.
-            - Protocol and InstanceProtocol is a string containing either 'TCP',
-              'SSL', 'HTTP', or 'HTTPS'
-            - SSLCertificateId is the ARN of an SSL certificate loaded into
-              AWS IAM
+            Where:
+                - LoadBalancerPortNumber and InstancePortNumber are integer
+                  values between 1 and 65535
+                - Protocol and InstanceProtocol is a string containing either 'TCP',
+                  'SSL', 'HTTP', or 'HTTPS'
+                - SSLCertificateId is the ARN of an SSL certificate loaded into
+                  AWS IAM
 
         :return: The status of the request
         """
@@ -388,6 +389,76 @@ class ELBConnection(AWSQueryConnection):
         obj = self.get_object('DisableAvailabilityZonesForLoadBalancer',
                                params, LoadBalancerZones)
         return obj.zones
+
+    def modify_lb_attribute(self, load_balancer_name, attribute, value):
+        """Changes an attribute of a Load Balancer
+
+        :type load_balancer_name: string
+        :param load_balancer_name: The name of the Load Balancer
+
+        :type attribute: string
+        :param attribute: The attribute you wish to change.
+
+        * crossZoneLoadBalancing - Boolean (true)
+
+        :type value: string
+        :param value: The new value for the attribute
+
+        :rtype: bool
+        :return: Whether the operation succeeded or not
+        """
+
+        bool_reqs = ('crosszoneloadbalancing',)
+        if attribute.lower() in bool_reqs:
+            if isinstance(value, bool):
+                if value:
+                    value = 'true'
+                else:
+                    value = 'false'
+
+        params = {'LoadBalancerName': load_balancer_name}
+        if attribute.lower() == 'crosszoneloadbalancing':
+            params['LoadBalancerAttributes.CrossZoneLoadBalancing.Enabled'
+                   ] = value
+        else:
+            raise ValueError('InvalidAttribute', attribute)
+        return self.get_status('ModifyLoadBalancerAttributes', params,
+                               verb='GET')
+
+    def get_all_lb_attributes(self, load_balancer_name):
+        """Gets all Attributes of a Load Balancer
+
+        :type load_balancer_name: string
+        :param load_balancer_name: The name of the Load Balancer
+
+        :rtype: boto.ec2.elb.attribute.LbAttributes
+        :return: The attribute object of the ELB.
+        """
+        from boto.ec2.elb.attributes import LbAttributes
+        params = {'LoadBalancerName': load_balancer_name}
+        return self.get_object('DescribeLoadBalancerAttributes',
+                               params, LbAttributes)
+
+    def get_lb_attribute(self, load_balancer_name, attribute):
+        """Gets an attribute of a Load Balancer
+
+        This will make an EC2 call for each method call.
+
+        :type load_balancer_name: string
+        :param load_balancer_name: The name of the Load Balancer
+
+        :type attribute: string
+        :param attribute: The attribute you wish to see.
+
+          * crossZoneLoadBalancing - Boolean
+
+        :rtype: Attribute dependent
+        :return: The new value for the attribute
+        """
+        attributes = self.get_all_lb_attributes(load_balancer_name)
+        if attribute.lower() == 'crosszoneloadbalancing':
+            return attributes.cross_zone_load_balancing.enabled
+        return None
 
     def register_instances(self, load_balancer_name, instances):
         """
@@ -535,6 +606,23 @@ class ELBConnection(AWSQueryConnection):
             params['CookieExpirationPeriod'] = cookie_expiration_period
         return self.get_status('CreateLBCookieStickinessPolicy', params)
 
+    def create_lb_policy(self, lb_name, policy_name, policy_type, policy_attributes):
+        """
+        Creates a new policy that contais the necessary attributes depending on
+        the policy type. Policies are settings that are saved for your load
+        balancer and that can be applied to the front-end listener, or
+        the back-end application server.
+        """
+        params = {'LoadBalancerName': lb_name,
+                  'PolicyName': policy_name,
+                  'PolicyTypeName': policy_type}
+        for index, (name, value) in enumerate(policy_attributes.iteritems(), 1):
+            params['PolicyAttributes.member.%d.AttributeName' % index] = name
+            params['PolicyAttributes.member.%d.AttributeValue' % index] = value
+        else:
+            params['PolicyAttributes'] = ''
+        return self.get_status('CreateLoadBalancerPolicy', params)
+
     def delete_lb_policy(self, lb_name, policy_name):
         """
         Deletes a policy from the LoadBalancer. The specified policy must not
@@ -554,6 +642,19 @@ class ELBConnection(AWSQueryConnection):
                   'LoadBalancerPort': lb_port}
         self.build_list_params(params, policies, 'PolicyNames.member.%d')
         return self.get_status('SetLoadBalancerPoliciesOfListener', params)
+
+    def set_lb_policies_of_backend_server(self, lb_name, instance_port, policies):
+        """
+        Replaces the current set of policies associated with a port on which
+        the back-end server is listening with a new set of policies.
+        """
+        params = {'LoadBalancerName': lb_name,
+                  'InstancePort': instance_port}
+        if policies:
+            self.build_list_params(params, policies, 'PolicyNames.member.%d')
+        else:
+            params['PolicyNames'] = ''
+        return self.get_status('SetLoadBalancerPoliciesForBackendServer', params)
 
     def apply_security_groups_to_lb(self, name, security_groups):
         """

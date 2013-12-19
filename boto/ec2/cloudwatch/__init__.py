@@ -33,6 +33,7 @@ import boto
 
 RegionData = {
     'us-east-1': 'monitoring.us-east-1.amazonaws.com',
+    'us-gov-west-1': 'monitoring.us-gov-west-1.amazonaws.com',
     'us-west-1': 'monitoring.us-west-1.amazonaws.com',
     'us-west-2': 'monitoring.us-west-2.amazonaws.com',
     'sa-east-1': 'monitoring.sa-east-1.amazonaws.com',
@@ -116,7 +117,7 @@ class CloudWatchConnection(AWSQueryConnection):
                                     validate_certs=validate_certs)
 
     def _required_auth_capability(self):
-        return ['ec2']
+        return ['hmac-v4']
 
     def build_dimension_param(self, dimension, params):
         prefix = 'Dimensions.member'

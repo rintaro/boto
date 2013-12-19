@@ -50,6 +50,7 @@ import logging.handlers
 import boto
 import boto.provider
 import tempfile
+import random
 import smtplib
 import datetime
 import re
@@ -76,6 +77,11 @@ except ImportError:
 
 from boto.compat import json
 
+try:
+    from boto.compat.json import JSONDecodeError
+except ImportError:
+    JSONDecodeError = ValueError
+
 # List of Query String Arguments of Interest
 qsa_of_interest = ['acl', 'cors', 'defaultObjectAcl', 'location', 'logging',
                    'partNumber', 'policy', 'requestPayment', 'torrent',
@@ -90,7 +96,8 @@ qsa_of_interest = ['acl', 'cors', 'defaultObjectAcl', 'location', 'logging',
                    # having it listed here should cause no problems because
                    # GET bucket?storageClass is not part of the S3 API.)
                    'storageClass',
-                   # websiteConfig is a QSA for buckets in Google Cloud Storage.
+                   # websiteConfig is a QSA for buckets in Google Cloud
+                   # Storage.
                    'websiteConfig',
                    # compose is a QSA for objects in Google Cloud Storage.
                    'compose']
@@ -118,8 +125,9 @@ def canonical_string(method, path, headers, expires=None,
     interesting_headers = {}
     for key in headers:
         lk = key.lower()
-        if headers[key] != None and (lk in ['content-md5', 'content-type', 'date'] or
-                                     lk.startswith(provider.header_prefix)):
+        if headers[key] is not None and \
+                (lk in ['content-md5', 'content-type', 'date'] or
+                 lk.startswith(provider.header_prefix)):
             interesting_headers[lk] = str(headers[key]).strip()
 
     # these keys get empty strings if they don't exist
@@ -281,15 +289,48 @@ class LazyLoadMetadata(dict):
 
         if key in self._leaves:
             resource = self._leaves[key]
-            val = boto.utils.retry_url(self._url + urllib.quote(resource,
-                                                                safe="/:"),
-                                       num_retries=self._num_retries)
-            if val and val[0] == '{':
-                val = json.loads(val)
+
+            for i in range(0, self._num_retries):
+                try:
+                    val = boto.utils.retry_url(
+                        self._url + urllib.quote(resource,
+                                                 safe="/:"),
+                        num_retries=self._num_retries)
+                    if val and val[0] == '{':
+                        val = json.loads(val)
+                        break
+                    else:
+                        p = val.find('\n')
+                        if p > 0:
+                            val = val.split('\n')
+                        break
+
+                except JSONDecodeError, e:
+                    boto.log.debug(
+                        "encountered '%s' exception: %s" % (
+                            e.__class__.__name__, e))
+                    boto.log.debug(
+                        'corrupted JSON data found: %s' % val)
+
+                except Exception, e:
+                    boto.log.debug("encountered unretryable" +
+                                   " '%s' exception, re-raising" % (
+                                       e.__class__.__name__))
+                    raise
+
+                boto.log.error("Caught exception reading meta data" +
+                               " for the '%s' try" % (i + 1))
+
+                if i + 1 != self._num_retries:
+                    next_sleep = random.random() * (2 ** i)
+                    time.sleep(next_sleep)
             else:
-                p = val.find('\n')
-                if p > 0:
-                    val = val.split('\n')
+                boto.log.error('Unable to read meta data, giving up')
+                boto.log.error(
+                    "encountered '%s' exception: %s" % (
+                        e.__class__.__name__, e))
+                raise
+
             self[key] = val
         elif key in self._dicts:
             self[key] = LazyLoadMetadata(self._url + key + '/',
@@ -324,19 +365,28 @@ def _build_instance_metadata_url(url, version, path):
     """
     Builds an EC2 metadata URL for fetching information about an instance.
 
-    Requires the following arguments: a URL, a version and a path.
-
     Example:
 
-        >>> _build_instance_metadata_url('http://169.254.169.254', 'latest', 'meta-data')
+        >>> _build_instance_metadata_url('http://169.254.169.254', 'latest', 'meta-data/')
         http://169.254.169.254/latest/meta-data/
 
+    :type url: string
+    :param url: URL to metadata service, e.g. 'http://169.254.169.254'
+
+    :type version: string
+    :param version: Version of the metadata to get, e.g. 'latest'
+
+    :type path: string
+    :param path: Path of the metadata to get, e.g. 'meta-data/'. If a trailing
+                 slash is required it must be passed in with the path.
+
+    :return: The full metadata URL
     """
-    return '%s/%s/%s/' % (url, version, path)
+    return '%s/%s/%s' % (url, version, path)
 
 
 def get_instance_metadata(version='latest', url='http://169.254.169.254',
-                          data='meta-data', timeout=None, num_retries=5):
+                          data='meta-data/', timeout=None, num_retries=5):
     """
     Returns the instance metadata as a nested Python dictionary.
     Simple values (e.g. local_hostname, hostname, etc.) will be
@@ -367,7 +417,8 @@ def get_instance_identity(version='latest', url='http://169.254.169.254',
     Returns the instance identity as a nested Python dictionary.
     """
     iid = {}
-    base_url = _build_instance_metadata_url(url, version, 'dynamic/instance-identity')
+    base_url = _build_instance_metadata_url(url, version,
+                                            'dynamic/instance-identity/')
     if timeout is not None:
         original = socket.getdefaulttimeout()
         socket.setdefaulttimeout(timeout)
@@ -405,6 +456,7 @@ ISO8601 = '%Y-%m-%dT%H:%M:%SZ'
 ISO8601_MS = '%Y-%m-%dT%H:%M:%S.%fZ'
 RFC1123 = '%a, %d %b %Y %H:%M:%S %Z'
 
+
 def get_ts(ts=None):
     if not ts:
         ts = time.gmtime()
@@ -423,6 +475,7 @@ def parse_ts(ts):
         except ValueError:
             dt = datetime.datetime.strptime(ts, RFC1123)
             return dt
+
 
 def find_class(module_name, class_name=None):
     if class_name:
@@ -453,13 +506,13 @@ def update_dme(username, password, dme_id, ip_address):
 
 def fetch_file(uri, file=None, username=None, password=None):
     """
-    Fetch a file based on the URI provided. If you do not pass in a file pointer
-    a tempfile.NamedTemporaryFile, or None if the file could not be
-    retrieved is returned.
+    Fetch a file based on the URI provided.
+    If you do not pass in a file pointer a tempfile.NamedTemporaryFile,
+    or None if the file could not be retrieved is returned.
     The URI can be either an HTTP url, or "s3://bucket_name/key_name"
     """
     boto.log.info('Fetching %s' % uri)
-    if file == None:
+    if file is None:
         file = tempfile.NamedTemporaryFile()
     try:
         if uri.startswith('s3://'):
@@ -504,7 +557,7 @@ class ShellCommand(object):
                                         stderr=subprocess.PIPE,
                                         cwd=cwd)
         if(self.wait):
-            while self.process.poll() == None:
+            while self.process.poll() is None:
                 time.sleep(1)
                 t = self.process.communicate()
                 self.log_fp.write(t[0])
@@ -513,7 +566,8 @@ class ShellCommand(object):
             self.exit_code = self.process.returncode
 
             if self.fail_fast and self.exit_code != 0:
-                raise Exception("Command " + self.command + " failed with status " + self.exit_code)
+                raise Exception("Command " + self.command +
+                                " failed with status " + self.exit_code)
 
             return self.exit_code
 
@@ -523,12 +577,14 @@ class ShellCommand(object):
     def getStatus(self):
         return self.exit_code
 
-    status = property(getStatus, setReadOnly, None, 'The exit code for the command')
+    status = property(getStatus, setReadOnly, None,
+                      'The exit code for the command')
 
     def getOutput(self):
         return self.log_fp.getvalue()
 
-    output = property(getOutput, setReadOnly, None, 'The STDIN and STDERR output of the command')
+    output = property(getOutput, setReadOnly, None,
+                      'The STDIN and STDERR output of the command')
 
 
 class AuthSMTPHandler(logging.handlers.SMTPHandler):
@@ -574,10 +630,10 @@ class AuthSMTPHandler(logging.handlers.SMTPHandler):
             smtp.login(self.username, self.password)
             msg = self.format(record)
             msg = "From: %s\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\n\r\n%s" % (
-                            self.fromaddr,
-                            ','.join(self.toaddrs),
-                            self.getSubject(record),
-                            email.utils.formatdate(), msg)
+                self.fromaddr,
+                ','.join(self.toaddrs),
+                self.getSubject(record),
+                email.utils.formatdate(), msg)
             smtp.sendmail(self.fromaddr, self.toaddrs, msg)
             smtp.quit()
         except (KeyboardInterrupt, SystemExit):
@@ -719,7 +775,7 @@ class Password(object):
         """
         self.str = str
         if hashfunc:
-           self.hashfunc = hashfunc
+            self.hashfunc = hashfunc
 
     def set(self, value):
         value = ensure_bytes(value)
@@ -729,7 +785,7 @@ class Password(object):
         return str(self.str)
 
     def __eq__(self, other):
-        if other == None:
+        if other is None:
             return False
         other = ensure_bytes(other)
         return str(self.hashfunc(other).hexdigest()) == str(self.str)
@@ -745,12 +801,14 @@ def notify(subject, body=None, html_body=None, to_string=None,
            attachments=None, append_instance_id=True):
     attachments = attachments or []
     if append_instance_id:
-        subject = "[%s] %s" % (boto.config.get_value("Instance", "instance-id"), subject)
+        subject = "[%s] %s" % (
+            boto.config.get_value("Instance", "instance-id"), subject)
     if not to_string:
         to_string = boto.config.get_value('Notification', 'smtp_to', None)
     if to_string:
         try:
-            from_string = boto.config.get_value('Notification', 'smtp_from', 'boto')
+            from_string = boto.config.get_value('Notification',
+                                                'smtp_from', 'boto')
             msg = email.mime.multipart.MIMEMultipart()
             msg['From'] = from_string
             msg['Reply-To'] = from_string
@@ -770,11 +828,13 @@ def notify(subject, body=None, html_body=None, to_string=None,
             for part in attachments:
                 msg.attach(part)
 
-            smtp_host = boto.config.get_value('Notification', 'smtp_host', 'localhost')
+            smtp_host = boto.config.get_value('Notification',
+                                              'smtp_host', 'localhost')
 
             # Alternate port support
             if boto.config.get_value("Notification", "smtp_port"):
-                server = smtplib.SMTP(smtp_host, int(boto.config.get_value("Notification", "smtp_port")))
+                server = smtplib.SMTP(smtp_host, int(
+                    boto.config.get_value("Notification", "smtp_port")))
             else:
                 server = smtplib.SMTP(smtp_host)
 
@@ -885,7 +945,7 @@ def guess_mime_type(content, deftype):
     :rtype: <type>:
     :return: <description>
     """
-    #Mappings recognized by cloudinit
+    # Mappings recognized by cloudinit
     starts_with_mappings = {
         '#include': 'text/x-include-url',
         '#!': 'text/x-shellscript',

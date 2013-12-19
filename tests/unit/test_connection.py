@@ -19,6 +19,8 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 # IN THE SOFTWARE.
 #
+from __future__ import with_statement
+
 import os
 import urlparse
 from tests.unit import unittest
@@ -83,11 +85,13 @@ class MockAWSService(AWSQueryConnection):
                  api_version=None, security_token=None,
                  validate_certs=True):
         self.region = region
+        if host is None:
+            host = self.region.endpoint
         AWSQueryConnection.__init__(self, aws_access_key_id,
                                     aws_secret_access_key,
                                     is_secure, port, proxy, proxy_port,
                                     proxy_user, proxy_pass,
-                                    self.region.endpoint, debug,
+                                    host, debug,
                                     https_connection_factory, path,
                                     security_token,
                                     validate_certs=validate_certs)
@@ -111,6 +115,64 @@ class TestAWSAuthConnection(unittest.TestCase):
         self.assertEqual(conn.get_path('/folder//image.jpg'), '/folder//image.jpg')
         self.assertEqual(conn.get_path('/folder////image.jpg'), '/folder////image.jpg')
         self.assertEqual(conn.get_path('///folder////image.jpg'), '///folder////image.jpg')
+        
+    def test_connection_behind_proxy(self):
+        os.environ['http_proxy'] = "http://john.doe:p4ssw0rd@127.0.0.1:8180"
+        conn = AWSAuthConnection(
+            'mockservice.cc-zone-1.amazonaws.com',
+            aws_access_key_id='access_key',
+            aws_secret_access_key='secret',
+            suppress_consec_slashes=False
+        )        
+        self.assertEqual(conn.proxy, '127.0.0.1')
+        self.assertEqual(conn.proxy_user, 'john.doe')
+        self.assertEqual(conn.proxy_pass, 'p4ssw0rd')
+        self.assertEqual(conn.proxy_port, '8180')
+        del os.environ['http_proxy']
+        
+    def test_connection_behind_proxy_without_explicit_port(self):
+        os.environ['http_proxy'] = "http://127.0.0.1"
+        conn = AWSAuthConnection(
+            'mockservice.cc-zone-1.amazonaws.com',
+            aws_access_key_id='access_key',
+            aws_secret_access_key='secret',
+            suppress_consec_slashes=False,
+            port=8180
+        )        
+        self.assertEqual(conn.proxy, '127.0.0.1')
+        self.assertEqual(conn.proxy_port, 8180)
+        del os.environ['http_proxy']
+
+    # this tests the proper setting of the host_header in v4 signing
+    def test_host_header_with_nonstandard_port(self):
+        # test standard port first
+        conn = V4AuthConnection(
+            'testhost',
+            aws_access_key_id='access_key',
+            aws_secret_access_key='secret')
+        request = conn.build_base_http_request(method='POST', path='/',
+            auth_path=None, params=None, headers=None, data='', host=None)
+        conn.set_host_header(request)
+        self.assertEqual(request.headers['Host'], 'testhost')
+
+        # next, test non-standard port
+        conn = V4AuthConnection(
+            'testhost',
+            aws_access_key_id='access_key',
+            aws_secret_access_key='secret',
+            port=8773)
+        request = conn.build_base_http_request(method='POST', path='/',
+            auth_path=None, params=None, headers=None, data='', host=None)
+        conn.set_host_header(request)
+        self.assertEqual(request.headers['Host'], 'testhost:8773')
+
+class V4AuthConnection(AWSAuthConnection):
+    def __init__(self, host, aws_access_key_id, aws_secret_access_key, port=443):
+        AWSAuthConnection.__init__(self, host, aws_access_key_id,
+            aws_secret_access_key, port=port)
+
+    def _required_auth_capability(self):
+        return ['hmac-v4']
 
 
 class TestAWSQueryConnection(unittest.TestCase):
@@ -284,6 +346,57 @@ class TestAWSQueryConnectionSimple(TestAWSQueryConnection):
                                  '/temp_fail/',
                                  'POST')
         self.assertEqual(resp.read(), b"{'test': 'success'}")
+
+    def test_connection_close(self):
+        """Check connection re-use after close header is received"""
+        HTTPretty.register_uri(HTTPretty.POST,
+                               'https://%s/' % self.region.endpoint,
+                               json.dumps({'test': 'secure'}),
+                               content_type='application/json',
+                               connection='close')
+
+        conn = self.region.connect(aws_access_key_id='access_key',
+                                   aws_secret_access_key='secret')
+
+        def mock_put_conn(*args, **kwargs):
+            raise Exception('put_http_connection should not be called!')
+
+        conn.put_http_connection = mock_put_conn
+
+        resp1 = conn.make_request('myCmd1',
+                                  {'par1': 'foo', 'par2': 'baz'},
+                                  "/",
+                                  "POST")
+
+        # If we've gotten this far then no exception was raised
+        # by attempting to put the connection back into the pool
+        # Now let's just confirm the close header was actually
+        # set or we have another problem.
+        self.assertEqual(resp1.getheader('connection'), 'close')
+
+    def test_port_pooling(self):
+        conn = self.region.connect(aws_access_key_id='access_key',
+                                   aws_secret_access_key='secret',
+                                   port=8080)
+
+        # Pick a connection, then put it back
+        con1 = conn.get_http_connection(conn.host, conn.port, conn.is_secure)
+        conn.put_http_connection(conn.host, conn.port, conn.is_secure, con1)
+
+        # Pick another connection, which hopefully is the same yet again
+        con2 = conn.get_http_connection(conn.host, conn.port, conn.is_secure)
+        conn.put_http_connection(conn.host, conn.port, conn.is_secure, con2)
+
+        self.assertEqual(con1, con2)
+
+        # Change the port and make sure a new connection is made
+        conn.port = 8081
+
+        con3 = conn.get_http_connection(conn.host, conn.port, conn.is_secure)
+        conn.put_http_connection(conn.host, conn.port, conn.is_secure, con3)
+
+        self.assertNotEqual(con1, con3)
+
 
 class TestAWSQueryStatus(TestAWSQueryConnection):
 

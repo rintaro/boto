@@ -30,7 +30,7 @@ from boto.rds.dbsnapshot import DBSnapshot
 from boto.rds.event import Event
 from boto.rds.regioninfo import RDSRegionInfo
 from boto.rds.dbsubnetgroup import DBSubnetGroup
-
+from boto.rds.vpcsecuritygroupmembership import VPCSecurityGroupMembership
 
 def regions():
     """
@@ -41,6 +41,8 @@ def regions():
     """
     return [RDSRegionInfo(name='us-east-1',
                           endpoint='rds.amazonaws.com'),
+            RDSRegionInfo(name='us-gov-west-1',
+                          endpoint='rds.us-gov-west-1.amazonaws.com'),
             RDSRegionInfo(name='eu-west-1',
                           endpoint='rds.eu-west-1.amazonaws.com'),
             RDSRegionInfo(name='us-west-1',
@@ -165,6 +167,7 @@ class RDSConnection(AWSQueryConnection):
                           license_model = None,
                           option_group_name = None,
                           iops=None,
+                          vpc_security_groups=None,
                           ):
         # API version: 2012-09-17
         # Parameter notes:
@@ -277,10 +280,10 @@ class RDSConnection(AWSQueryConnection):
                         * SQL Server:
                           Not applicable and must be None.
 
-        :type param_group: str
-        :param param_group: Name of DBParameterGroup to associate with
-                            this DBInstance.  If no groups are specified
-                            no parameter groups will be used.
+        :type param_group: str or ParameterGroup object
+        :param param_group: Name of DBParameterGroup or ParameterGroup instance
+                            to associate with this DBInstance.  If no groups are
+                            specified no parameter groups will be used.
 
         :type security_groups: list of str or list of DBSecurityGroup objects
         :param security_groups: List of names of DBSecurityGroup to
@@ -363,6 +366,10 @@ class RDSConnection(AWSQueryConnection):
                       If you specify a value, it must be at least 1000 IOPS and you must
                       allocate 100 GB of storage.
 
+        :type vpc_security_groups: list of str or a VPCSecurityGroupMembership object
+        :param vpc_security_groups: List of VPC security group ids or a list of
+            VPCSecurityGroupMembership objects this DBInstance should be a member of
+
         :rtype: :class:`boto.rds.dbinstance.DBInstance`
         :return: The new db instance.
         """
@@ -390,6 +397,7 @@ class RDSConnection(AWSQueryConnection):
         # port => Port
         # preferred_backup_window => PreferredBackupWindow
         # preferred_maintenance_window => PreferredMaintenanceWindow
+        # vpc_security_groups => VpcSecurityGroupIds.member.N
         params = {
                   'AllocatedStorage': allocated_storage,
                   'AutoMinorVersionUpgrade': str(auto_minor_version_upgrade).lower() if auto_minor_version_upgrade else None,
@@ -399,7 +407,9 @@ class RDSConnection(AWSQueryConnection):
                   'DBInstanceClass': instance_class,
                   'DBInstanceIdentifier': id,
                   'DBName': db_name,
-                  'DBParameterGroupName': param_group,
+                  'DBParameterGroupName': (param_group.name
+                                           if isinstance(param_group, ParameterGroup)
+                                           else param_group),
                   'DBSubnetGroupName': db_subnet_group_name,
                   'Engine': engine,
                   'EngineVersion': engine_version,
@@ -422,9 +432,18 @@ class RDSConnection(AWSQueryConnection):
                     l.append(group)
             self.build_list_params(params, l, 'DBSecurityGroups.member')
 
+        if vpc_security_groups:
+            l = []
+            for vpc_grp in vpc_security_groups:
+                if isinstance(vpc_grp, VPCSecurityGroupMembership):
+                    l.append(vpc_grp.vpc_group)
+                else:
+                    l.append(vpc_grp)
+            self.build_list_params(params, l, 'VpcSecurityGroupIds.member')
+
         # Remove any params set to None
         for k, v in params.items():
-          if not v: del(params[k])
+          if v is None: del(params[k])
 
         return self.get_object('CreateDBInstance', params, DBInstance)
 
@@ -497,6 +516,42 @@ class RDSConnection(AWSQueryConnection):
         return self.get_object('CreateDBInstanceReadReplica',
                                params, DBInstance)
 
+
+    def promote_read_replica(self, id,
+                          backup_retention_period=None,
+                          preferred_backup_window=None):
+        """
+        Promote a Read Replica to a standalone DB Instance.
+
+        :type id: str
+        :param id: Unique identifier for the new instance.
+                   Must contain 1-63 alphanumeric characters.
+                   First character must be a letter.
+                   May not end with a hyphen or contain two consecutive hyphens
+
+        :type backup_retention_period: int
+        :param backup_retention_period: The number of days for which automated
+                                        backups are retained.  Setting this to
+                                        zero disables automated backups.
+
+        :type preferred_backup_window: str
+        :param preferred_backup_window: The daily time range during which
+                                        automated backups are created (if
+                                        enabled).  Must be in h24:mi-hh24:mi
+                                        format (UTC).
+
+        :rtype: :class:`boto.rds.dbinstance.DBInstance`
+        :return: The new db instance.
+        """
+        params = {'DBInstanceIdentifier': id}
+        if backup_retention_period is not None:
+            params['BackupRetentionPeriod'] = backup_retention_period
+        if preferred_backup_window:
+            params['PreferredBackupWindow'] = preferred_backup_window
+
+        return self.get_object('PromoteReadReplica', params, DBInstance)
+
+
     def modify_dbinstance(self, id, param_group=None, security_groups=None,
                           preferred_maintenance_window=None,
                           master_password=None, allocated_storage=None,
@@ -505,17 +560,20 @@ class RDSConnection(AWSQueryConnection):
                           preferred_backup_window=None,
                           multi_az=False,
                           apply_immediately=False,
-                          iops=None):
+                          iops=None,
+                          vpc_security_groups=None,
+                          new_instance_id=None,
+                          ):
         """
         Modify an existing DBInstance.
 
         :type id: str
         :param id: Unique identifier for the new instance.
 
-        :type param_group: str
-        :param param_group: Name of DBParameterGroup to associate with
-                            this DBInstance.  If no groups are specified
-                            no parameter groups will be used.
+        :type param_group: str or ParameterGroup object
+        :param param_group: Name of DBParameterGroup or ParameterGroup instance
+                            to associate with this DBInstance.  If no groups are
+                            specified no parameter groups will be used.
 
         :type security_groups: list of str or list of DBSecurityGroup objects
         :param security_groups: List of names of DBSecurityGroup to authorize on
@@ -581,12 +639,21 @@ class RDSConnection(AWSQueryConnection):
                       If you specify a value, it must be at least 1000 IOPS and you must
                       allocate 100 GB of storage.
 
+        :type vpc_security_groups: list of str or a VPCSecurityGroupMembership object
+        :param vpc_security_groups: List of VPC security group ids or a
+            VPCSecurityGroupMembership object this DBInstance should be a member of
+
+        :type new_instance_id: str
+        :param new_instance_id: New name to rename the DBInstance to.
+
         :rtype: :class:`boto.rds.dbinstance.DBInstance`
         :return: The modified db instance.
         """
         params = {'DBInstanceIdentifier': id}
         if param_group:
-            params['DBParameterGroupName'] = param_group
+            params['DBParameterGroupName'] = (param_group.name
+                                              if isinstance(param_group, ParameterGroup)
+                                              else param_group)
         if security_groups:
             l = []
             for group in security_groups:
@@ -595,6 +662,14 @@ class RDSConnection(AWSQueryConnection):
                 else:
                     l.append(group)
             self.build_list_params(params, l, 'DBSecurityGroups.member')
+        if vpc_security_groups:
+            l = []
+            for vpc_grp in vpc_security_groups:
+                if isinstance(vpc_grp, VPCSecurityGroupMembership):
+                    l.append(vpc_grp.vpc_group)
+                else:
+                    l.append(vpc_grp)
+            self.build_list_params(params, l, 'VpcSecurityGroupIds.member')
         if preferred_maintenance_window:
             params['PreferredMaintenanceWindow'] = preferred_maintenance_window
         if master_password:
@@ -613,6 +688,8 @@ class RDSConnection(AWSQueryConnection):
             params['ApplyImmediately'] = 'true'
         if iops:
             params['Iops'] = iops
+        if new_instance_id:
+            params['NewDBInstanceIdentifier'] = new_instance_id
 
         return self.get_object('ModifyDBInstance', params, DBInstance)
 
@@ -739,10 +816,10 @@ class RDSConnection(AWSQueryConnection):
         :param engine: Name of database engine.
 
         :type description: string
-        :param description: The description of the new security group
+        :param description: The description of the new dbparameter group
 
-        :rtype: :class:`boto.rds.dbsecuritygroup.DBSecurityGroup`
-        :return: The newly created DBSecurityGroup
+        :rtype: :class:`boto.rds.parametergroup.ParameterGroup`
+        :return: The newly created ParameterGroup
         """
         params = {'DBParameterGroupName': name,
                   'DBParameterGroupFamily': engine,
@@ -751,10 +828,10 @@ class RDSConnection(AWSQueryConnection):
 
     def modify_parameter_group(self, name, parameters=None):
         """
-        Modify a parameter group for your account.
+        Modify a ParameterGroup for your account.
 
         :type name: string
-        :param name: The name of the new parameter group
+        :param name: The name of the new ParameterGroup
 
         :type parameters: list of :class:`boto.rds.parametergroup.Parameter`
         :param parameters: The new parameters
@@ -794,10 +871,10 @@ class RDSConnection(AWSQueryConnection):
 
     def delete_parameter_group(self, name):
         """
-        Delete a DBSecurityGroup from your account.
+        Delete a ParameterGroup from your account.
 
         :type key_name: string
-        :param key_name: The name of the DBSecurityGroup to delete
+        :param key_name: The name of the ParameterGroup to delete
         """
         params = {'DBParameterGroupName': name}
         return self.get_status('DeleteDBParameterGroup', params)
@@ -1007,6 +1084,23 @@ class RDSConnection(AWSQueryConnection):
         params = {'DBSnapshotIdentifier': snapshot_id,
                   'DBInstanceIdentifier': dbinstance_id}
         return self.get_object('CreateDBSnapshot', params, DBSnapshot)
+      
+    def copy_dbsnapshot(self, source_snapshot_id, target_snapshot_id):
+        """
+        Copies the specified DBSnapshot.
+        
+        :type source_snapshot_id: string
+        :param source_snapshot_id: The identifier for the source DB snapshot.
+        
+        :type target_snapshot_id: string
+        :param target_snapshot_id: The identifier for the copied snapshot.
+        
+        :rtype: :class:`boto.rds.dbsnapshot.DBSnapshot`
+        :return: The newly created DBSnapshot.        
+        """
+        params = {'SourceDBSnapshotIdentifier': source_snapshot_id, 
+                  'TargetDBSnapshotIdentifier': target_snapshot_id}
+        return self.get_object('CopyDBSnapshot', params, DBSnapshot)
 
     def delete_dbsnapshot(self, identifier):
         """
@@ -1090,7 +1184,8 @@ class RDSConnection(AWSQueryConnection):
                                               restore_time=None,
                                               dbinstance_class=None,
                                               port=None,
-                                              availability_zone=None):
+                                              availability_zone=None,
+                                              db_subnet_group_name=None):
 
         """
         Create a new DBInstance from a point in time.
@@ -1123,6 +1218,11 @@ class RDSConnection(AWSQueryConnection):
         :param availability_zone: Name of the availability zone to place
                                   DBInstance into.
 
+        :type db_subnet_group_name: str
+        :param db_subnet_group_name: A DB Subnet Group to associate with this DB Instance.
+                                     If there is no DB Subnet Group, then it is a non-VPC DB
+                                     instance.
+
         :rtype: :class:`boto.rds.dbinstance.DBInstance`
         :return: The newly created DBInstance
         """
@@ -1138,6 +1238,8 @@ class RDSConnection(AWSQueryConnection):
             params['Port'] = port
         if availability_zone:
             params['AvailabilityZone'] = availability_zone
+        if db_subnet_group_name is not None:
+            params['DBSubnetGroupName'] = db_subnet_group_name
         return self.get_object('RestoreDBInstanceToPointInTime',
                                params, DBInstance)
 

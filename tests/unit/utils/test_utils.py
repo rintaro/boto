@@ -31,6 +31,8 @@ try:
     from unittest import mock
 except ImportError:
     import mock
+import thread
+import time
 
 import boto.utils
 from boto.utils import Password
@@ -41,6 +43,21 @@ from boto.utils import retry_url
 from boto.utils import LazyLoadMetadata
 
 from boto.compat import json
+
+
+@unittest.skip("http://bugs.python.org/issue7980")
+class TestThreadImport(unittest.TestCase):
+    def test_strptime(self):
+        def f():
+            for m in xrange(1, 13):
+                for d in xrange(1,29):
+                    boto.utils.parse_ts('2013-01-01T00:00:00Z')
+
+        for _ in xrange(10):
+            thread.start_new_thread(f, ())
+
+        time.sleep(3)
+
 
 class TestPassword(unittest.TestCase):
     """Test basic password functionality"""

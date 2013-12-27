@@ -27,6 +27,7 @@
 from boto.pyami.config import Config, BotoConfigLocations
 from boto.storage_uri import BucketStorageUri, FileStorageUri
 import boto.plugin
+import datetime
 import os
 import platform
 import re
@@ -40,6 +41,9 @@ vfile = os.path.join(os.path.dirname(os.path.abspath(boto.__file__ )), "version.
 with open(vfile) as f:
   __version__ = f.read().strip()
 Version = __version__  # for backware compatibility
+
+# http://bugs.python.org/issue7980
+datetime.datetime.strptime('', '')
 
 UserAgent = 'Boto/%s Python/%s %s/%s' % (
     __version__,

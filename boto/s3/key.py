@@ -48,6 +48,7 @@ from boto.utils import compute_md5, compute_hash
 from boto.utils import find_matching_headers
 from boto.utils import merge_headers_by_name
 from boto.utils import wrap_hash_function
+from boto.utils import ensure_string
 try:
     from hashlib import md5
 except ImportError:
@@ -163,7 +164,7 @@ class Key(object):
 
     def _get_md5(self):
         if 'md5' in self.local_hashes and self.local_hashes['md5']:
-            return binascii.b2a_hex(self.local_hashes['md5'])
+            return ensure_string(binascii.b2a_hex(self.local_hashes['md5']))
 
     def _set_md5(self, value):
         if value:
@@ -175,7 +176,7 @@ class Key(object):
 
     def _get_base64md5(self):
         if 'md5' in self.local_hashes and self.local_hashes['md5']:
-            return binascii.b2a_base64(self.local_hashes['md5']).rstrip('\n')
+            return ensure_string(binascii.b2a_base64(self.local_hashes['md5'])).rstrip('\n')
 
     def _set_base64md5(self, value):
         if value:
